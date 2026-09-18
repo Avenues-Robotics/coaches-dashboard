@@ -12,7 +12,6 @@
 
 name: Team task
 description: Send a task to a team - it'll show up on their repo and the org board automatically.
-title: ""
 body:
   - type: dropdown
     id: team
