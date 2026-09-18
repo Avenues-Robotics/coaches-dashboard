@@ -1,0 +1,94 @@
+# Destination in the coaches dashboard repo:
+#   .github/ISSUE_TEMPLATE/team-task.yml
+#
+# This is what makes "New issue" on that repo offer a "Team task" form
+# with these fields, instead of a blank issue. See SETUP.md.
+#
+# Note on Assignees: there's no way to add an assignee picker inside this
+# form - GitHub only gives you that as the real "Assignees" box in the
+# sidebar of the new-issue page itself (to the right of this form). Anyone
+# with access to this dashboard repo will show up there; whoever you pick
+# gets carried over to the issue created in the team's repo automatically.
+
+name: Team task
+description: Send a task to a team - it'll show up on their repo and the org board automatically.
+title: ""
+body:
+  - type: dropdown
+    id: team
+    attributes:
+      label: Team
+      description: Which team is this for?
+      options:
+        # One line per team. Must exactly match the text you use here AND
+        # the TEAM_REPO_MAP entry in relay-to-team-repo.yml. Add a line
+        # any time you add a new team.
+        - Lovelace
+        - Ruckus
+        - Tritonics
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What needs to happen?
+      placeholder: "e.g. Order more AA batteries before Saturday's meet"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      options:
+        - Todo
+        - In Progress
+        - Done
+      default: 0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options:
+        - Task
+        - Bug
+        - Feature
+      default: 0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Leave blank if you don't want to set one.
+      options:
+        - Must
+        - Should
+        - Could
+        - "Won't (this time)"
+    validations:
+      required: false
+
+  - type: input
+    id: start-date
+    attributes:
+      label: Start date
+      description: "Format: YYYY-MM-DD. Leave blank if you're not sure yet."
+      placeholder: "2026-09-20"
+    validations:
+      required: false
+
+  - type: input
+    id: target-date
+    attributes:
+      label: Target date
+      description: "Format: YYYY-MM-DD. Leave blank if you're not sure yet."
+      placeholder: "2026-10-04"
+    validations:
+      required: false

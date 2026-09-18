@@ -1,0 +1,206 @@
+# Destination in the coaches dashboard repo:
+#   .github/workflows/relay-to-team-repo.yml
+#
+# What it does: when you open an issue here using the "Team task" template
+# (team-task.yml), this reads which team you picked plus the Status, Type,
+# Priority, Start date and Target date you set, creates a matching issue
+# (with the same assignees) in that team's own repo - which the
+# add-to-project.yml already running there picks up automatically and
+# adds to the org board, tagged with that team - sets the extra fields on
+# that board item, then comments on this original issue with a link to
+# the one it created, and closes it. So the dashboard stays a clean inbox
+# instead of a second place you have to track the same task.
+#
+# A field that doesn't exist on the project yet (e.g. you haven't added a
+# "Priority" field there), or a value that doesn't match one of its
+# options, is skipped with a warning in the run's log rather than failing
+# the whole thing - the issue and board item still get created either way.
+#
+# Uses the same PROJECT_PAT secret the team repos already use - it just
+# needs this repo added to that secret's repository access list too (see
+# SETUP.md).
+
+name: Relay issue to team repo
+
+on:
+  issues:
+    types: [opened]
+
+env:
+  ORG: Avenues-Robotics
+  PROJECT_NUMBER: "9"   # the org project's number - same one every add-to-project.yml uses
+  # One line per team: the exact text of that team's option in the "Team"
+  # dropdown (team-task.yml) -> their repo's name. Keep this in sync with
+  # that dropdown, and with each repo's own TEAM_NAME in add-to-project.yml.
+  TEAM_REPO_MAP: |
+    {
+      "Tritonics": "17253_BIOBUZZ",
+      "Ruckus": "14712_BIOBUZZ",
+      "Lovelace": "20701_BIOBUZZ"    
+    }
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read the form fields from the issue body
+        id: parse
+        env:
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          set -euo pipefail
+          CLEAN_BODY=$(printf '%s' "$BODY" | tr -d '\r')
+
+          # Single-line answer under a "### <Label>" heading. GitHub prints
+          # "_No response_" for a field the form left optional and blank -
+          # treat that the same as empty.
+          extract_single() {
+            local label="$1" val
+            val=$(awk -v l="### $label" '$0==l{flag=1; next} /^### /{flag=0} flag' <<< "$CLEAN_BODY" \
+              | sed '/^[[:space:]]*$/d')
+            [ "$val" = "_No response_" ] && val=""
+            printf '%s' "$val"
+          }
+
+          # Same, but keeps internal blank lines (for the free-text Details
+          # box) and only trims the one leading/trailing blank line GitHub
+          # always adds around the answer.
+          extract_multi() {
+            local label="$1" val
+            val=$(awk -v l="### $label" '$0==l{flag=1; next} /^### /{flag=0} flag' <<< "$CLEAN_BODY")
+            val=$(sed -e '1{/^$/d}' -e '${/^$/d}' <<< "$val")
+            [ "$val" = "_No response_" ] && val=""
+            printf '%s' "$val"
+          }
+
+          TEAM=$(extract_single "Team")
+          STATUS=$(extract_single "Status")
+          TYPE=$(extract_single "Type")
+          PRIORITY=$(extract_single "Priority")
+          START_DATE=$(extract_single "Start date")
+          TARGET_DATE=$(extract_single "Target date")
+          DETAILS=$(extract_multi "Details")
+
+          if [ -z "$TEAM" ]; then
+            echo "::error::Could not find a 'Team' selection in this issue. Was it created from the 'Team task' template, not a blank issue?"
+            exit 1
+          fi
+
+          DELIM="EOF_$(date +%s%N)"
+          {
+            echo "team=$TEAM"
+            echo "status=$STATUS"
+            echo "type=$TYPE"
+            echo "priority=$PRIORITY"
+            echo "start_date=$START_DATE"
+            echo "target_date=$TARGET_DATE"
+            echo "details<<$DELIM"
+            echo "$DETAILS"
+            echo "$DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Look up that team's repo
+        id: repo
+        run: |
+          set -euo pipefail
+          REPO=$(echo "$TEAM_REPO_MAP" | jq -r --arg team "${{ steps.parse.outputs.team }}" '.[$team] // empty')
+          if [ -z "$REPO" ]; then
+            echo "::error::No repo mapped for team '${{ steps.parse.outputs.team }}'. Add it to TEAM_REPO_MAP in this workflow."
+            exit 1
+          fi
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+
+      - name: Create the issue in the team's repo
+        id: create
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          DETAILS: ${{ steps.parse.outputs.details }}
+          SOURCE_URL: ${{ github.event.issue.html_url }}
+          ASSIGNEES_JSON: ${{ toJson(github.event.issue.assignees) }}
+          TARGET_REPO: ${{ steps.repo.outputs.repo }}
+          TITLE: ${{ github.event.issue.title }}
+        run: |
+          set -euo pipefail
+          BODY=$(printf '%s\n\n---\nSent from the coaches dashboard: %s' "$DETAILS" "$SOURCE_URL")
+          ASSIGNEES=$(jq -r '[.[].login] | join(",")' <<< "$ASSIGNEES_JSON")
+
+          if [ -n "$ASSIGNEES" ]; then
+            if ! URL=$(gh issue create --repo "$ORG/$TARGET_REPO" --title "$TITLE" --body "$BODY" --assignee "$ASSIGNEES"); then
+              echo "::warning::Could not create the issue with assignee(s) '$ASSIGNEES' - they may not have access to $TARGET_REPO. Creating it unassigned instead."
+              URL=$(gh issue create --repo "$ORG/$TARGET_REPO" --title "$TITLE" --body "$BODY")
+            fi
+          else
+            URL=$(gh issue create --repo "$ORG/$TARGET_REPO" --title "$TITLE" --body "$BODY")
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Add to the project and set its fields
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          ISSUE_URL: ${{ steps.create.outputs.url }}
+          STATUS: ${{ steps.parse.outputs.status }}
+          TYPE: ${{ steps.parse.outputs.type }}
+          PRIORITY: ${{ steps.parse.outputs.priority }}
+          START_DATE: ${{ steps.parse.outputs.start_date }}
+          TARGET_DATE: ${{ steps.parse.outputs.target_date }}
+        run: |
+          set -euo pipefail
+
+          PROJECT_ID=$(gh project view "$PROJECT_NUMBER" --owner "$ORG" --format json --jq '.id')
+          FIELD_LIST=$(gh project field-list "$PROJECT_NUMBER" --owner "$ORG" --format json)
+          # Safe to call even if the team repo's own add-to-project.yml has
+          # already added this issue - it just returns the existing item.
+          ITEM_ID=$(gh project item-add "$PROJECT_NUMBER" --owner "$ORG" --url "$ISSUE_URL" --format json --jq '.id')
+
+          set_single_select() {
+            local field_label="$1" option_name="$2" field_json field_id option_id
+            [ -z "$option_name" ] && return 0
+
+            field_json=$(jq -r --arg name "$field_label" \
+              '.fields[] | select(.name | ascii_downcase == ($name | ascii_downcase))' <<< "$FIELD_LIST")
+            if [ -z "$field_json" ]; then
+              echo "::warning::No project field named '$field_label' - skipping it. See SETUP.md to add it."
+              return 0
+            fi
+            field_id=$(jq -r '.id' <<< "$field_json")
+            option_id=$(jq -r --arg opt "$option_name" \
+              '.options[]? | select(.name | ascii_downcase == ($opt | ascii_downcase)) | .id' <<< "$field_json")
+            if [ -z "$option_id" ]; then
+              echo "::warning::'$field_label' has no option named '$option_name' - skipping it."
+              return 0
+            fi
+            gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" \
+              --field-id "$field_id" --single-select-option-id "$option_id"
+          }
+
+          set_date() {
+            local field_label="$1" date_value="$2" field_json field_id
+            [ -z "$date_value" ] && return 0
+            if ! [[ "$date_value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+              echo "::warning::'$field_label' value '$date_value' isn't in YYYY-MM-DD format - skipping it."
+              return 0
+            fi
+            field_json=$(jq -r --arg name "$field_label" \
+              '.fields[] | select(.name | ascii_downcase == ($name | ascii_downcase))' <<< "$FIELD_LIST")
+            if [ -z "$field_json" ]; then
+              echo "::warning::No project field named '$field_label' - skipping it. See SETUP.md to add it."
+              return 0
+            fi
+            field_id=$(jq -r '.id' <<< "$field_json")
+            gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" --field-id "$field_id" --date "$date_value"
+          }
+
+          set_single_select "Status" "$STATUS"
+          set_single_select "Type" "$TYPE"
+          set_single_select "Priority" "$PRIORITY"
+          set_date "Start date" "$START_DATE"
+          set_date "Target date" "$TARGET_DATE"
+
+      - name: Close the original with a link to the new one
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+        run: |
+          set -euo pipefail
+          gh issue comment "${{ github.event.issue.html_url }}" \
+            --body "Sent to ${{ steps.repo.outputs.repo }}: ${{ steps.create.outputs.url }}"
+          gh issue close "${{ github.event.issue.html_url }}"
